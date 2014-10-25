@@ -1,0 +1,56 @@
+#cloud-config
+
+#
+# Template for launch-user-data.yml
+#
+# Copy your RSA private key and etcd discovery token
+# into the right spots below and save as launch-user-data.yml
+#
+# Then customize launch.sh and run it to launch your cluster
+#
+# Create your own RSA key. Run ssh-keygen, then paste the
+# private key into the 'content' block below.  Leave the
+# file path unchanged
+#
+
+write_files:
+  - path: /home/core/etc/iris.rsa
+    permissions: 0644
+    owner: core
+    content: |
+      -----BEGIN RSA PRIVATE KEY-----
+      PASTE YOUR KEY HERE
+      -----END RSA PRIVATE KEY-----
+
+
+coreos:
+  etcd:
+    # generate a new token for each unique cluster from https://discovery.etcd.io/new
+    discovery: https://discovery.etcd.io/PUT-YOUR-TOKEN-HERE
+    # multi-region and multi-cloud deployments need to use $public_ipv4
+    addr: $private_ipv4:4001
+    peer-addr: $private_ipv4:7001
+  units:
+    - name: etcd.service
+      command: start
+    - name: fleet.service
+      command: start
+    - name: iris.service
+      command: start
+      enable: true
+      content: |
+        [Unit]
+        Description=Iris relay
+        After=docker.service
+
+        [Service]
+        User=core
+        Restart=always
+        RestartSec=5
+        ExecStartPre=/bin/mkdir -p /home/core/bin
+        ExecStartPre=/usr/bin/curl https://s3.amazonaws.com/bitmechanic-temp/iris -o /home/core/bin/iris
+        ExecStartPre=/usr/bin/chmod 755 /home/core/bin/iris
+        ExecStart=/home/core/bin/iris -net test -rsa /home/core/etc/iris.rsa
+
+        [Install]
+        WantedBy=multi-user.target
