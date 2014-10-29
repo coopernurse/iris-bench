@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"gopkg.in/project-iris/iris-go.v1"
@@ -9,6 +10,7 @@ import (
 	"math/rand"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -16,9 +18,11 @@ func main() {
 	var mode string
 	var seconds int
 	var concur int
+	var runners int
 	flag.StringVar(&mode, "m", "client", "Mode to run as: (echo / add / server)")
 	flag.IntVar(&seconds, "s", 10, "Seconds to run client for")
-	flag.IntVar(&concur, "c", 1, "Concurrency")
+	flag.IntVar(&concur, "c", 1, "Concurrency per test runner")
+	flag.IntVar(&runners, "r", 1, "Test runners to spawn")
 	flag.Parse()
 
 	rand.Seed(time.Now().UnixNano())
@@ -33,8 +37,8 @@ func main() {
 			Seconds: seconds,
 			Concur:  concur,
 		}
-		log.Println("Starting bench:", req)
-		resp := bench(req)
+		log.Printf("Starting bench: runners=%d req=%+v\n", runners, req)
+		resp := benchCluster(runners, req)
 		log.Println("Bench done:", resp)
 		log.Printf("Req/sec: %.2f\n", float64(resp.Success)/(float64(resp.Duration)/1e9))
 		log.Println("Timeouts:", resp.Timeout)
@@ -66,6 +70,68 @@ const (
 	ResultTimeout
 	ResultBadResponse
 )
+
+func benchCluster(runners int, req BenchReq) BenchResp {
+	conn, err := iris.Connect(55555)
+	if err != nil {
+		log.Fatalf("failed to connect to the Iris relay: %v.", err)
+	}
+	defer conn.Close()
+
+	reqBytes, err := json.Marshal(req)
+	if err != nil {
+		log.Fatalf("failed to marshal req: %v", err)
+	}
+
+	out := make(chan BenchResp)
+	aggCh := make(chan BenchResp)
+
+	go func() {
+		start := time.Now()
+		numOk := 0
+		numTimeout := 0
+		numBadResp := 0
+		for r := range out {
+			numOk += r.Success
+			numBadResp += r.BadResponse
+			numTimeout += r.Timeout
+
+			log.Println("Got sub-bench response: ", r)
+		}
+		aggCh <- BenchResp{
+			Duration:    time.Now().Sub(start),
+			Success:     numOk,
+			Timeout:     numTimeout,
+			BadResponse: numBadResp,
+		}
+	}()
+
+	wg := sync.WaitGroup{}
+	timeout := time.Second * time.Duration(req.Seconds+10)
+	for i := 0; i < runners; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			if reply, err := conn.Request("bench", reqBytes, timeout); err == nil {
+				var r BenchResp
+				err = json.Unmarshal(reply, &r)
+				if err == nil {
+					out <- r
+				} else {
+					log.Fatalf("failed to unmarshal reply: %v - %v", err, string(reply))
+				}
+			} else {
+				log.Println("ERROR: timeout of bench request")
+				out <- BenchResp{Timeout: 1}
+			}
+		}()
+	}
+	wg.Wait()
+	close(out)
+
+	return <-aggCh
+}
 
 func bench(req BenchReq) BenchResp {
 	out := make(chan Result)
@@ -176,6 +242,17 @@ func randSeq(n int) string {
 // Server //
 ////////////
 
+func benchSvr(req []byte) ([]byte, error) {
+	var benchReq BenchReq
+	err := json.Unmarshal(req, &benchReq)
+	if err != nil {
+		return nil, err
+	}
+
+	benchResp := bench(benchReq)
+	return json.Marshal(benchResp)
+}
+
 func echoSvr(req []byte) ([]byte, error) {
 	return req, nil
 }
@@ -218,6 +295,12 @@ func server() {
 		log.Fatalf("failed to register add to the Iris relay: %v.", err)
 	}
 	defer add.Unregister()
+
+	benchS, err := iris.Register(55555, "bench", NewFxHandler(benchSvr), nil)
+	if err != nil {
+		log.Fatalf("failed to register bench to the Iris relay: %v.", err)
+	}
+	defer benchS.Unregister()
 
 	for {
 		time.Sleep(time.Second)
