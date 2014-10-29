@@ -1,0 +1,14 @@
+[Unit]
+Description=iris-bench - server mode
+After=docker.service
+Requires=docker.service
+
+[Service]
+Restart=always
+ExecStartPre=-/usr/bin/docker kill iris-bench-server
+ExecStartPre=-/usr/bin/docker rm iris-bench-server
+ExecStart=/usr/bin/docker run --name iris-bench-server --net=host coopernurse/iris-bench:v3
+ExecStop=/usr/bin/docker stop iris-bench-server
+
+[X-Fleet]
+Global=true

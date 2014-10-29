@@ -8,7 +8,7 @@
 COUNT=3
 
 # type of instances to start
-TYPE=t2.micro
+TYPE=c3.large
 
 # See the CoreOS AMIs here:
 # https://coreos.com/docs/running-coreos/cloud-providers/ec2/
